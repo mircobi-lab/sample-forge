@@ -1,0 +1,14 @@
+{
+  "name": "sample-forge",
+  "private": true,
+  "description": "Sample Forge · MBStudio91 — da un brano a un pacchetto di campioni, tutto nel browser",
+  "type": "module",
+  "scripts": {
+    "build": "python3 build.py",
+    "test": "node tests/browser-test.mjs",
+    "bench": "node tests/eval.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.48.2"
+  }
+}

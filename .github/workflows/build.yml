@@ -1,0 +1,56 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Costruisci app, versione per il sito e app per Mac
+        run: python3 build.py
+
+      - name: Installa il browser di prova
+        run: |
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+
+      - name: Prova completa nel browser
+        run: node tests/browser-test.mjs
+
+      - name: File pronti da scaricare
+        uses: actions/upload-artifact@v4
+        with:
+          name: sample-forge
+          path: |
+            dist/sample-forge.html
+            dist/sample-pack-app.html
+            dist/SampleForge-Mac.zip
+            dist/screenshot.png
+          if-no-files-found: error
+
+      - name: Pubblica la release (solo sui tag v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/sample-forge.html
+            dist/sample-pack-app.html
+            dist/SampleForge-Mac.zip
