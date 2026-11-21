@@ -159,6 +159,12 @@ SampleForgeEditor::SampleForgeEditor (SampleForgeProcessor& p) : AudioProcessorE
     addAndMakeVisible (bitsBox); addAndMakeVisible (opt432); addAndMakeVisible (optStems);
     exportBtn.onClick = [this] { chooseExport(); };
 
+    addAndMakeVisible (ledBtn);
+    ledBtn.setToggleState (proc.controllerLedsOn(), juce::dontSendNotification);
+    ledBtn.setTooltip ("Mostra lo stato dei pad sui LED di Push, Launchpad o Launchkey collegato");
+    ledBtn.onClick = [this] { proc.setControllerLeds (ledBtn.getToggleState()); };
+    ledBtn.setTooltip ("LED dei pad sul controller collegato (Push 2 USER, Launchpad Mini MK3, Launchkey)");
+
     proc.onStateChanged = [this] { refreshFromResult(); };
     proc.onToast = [this] (juce::String s) { showToast (s); };
 
@@ -186,6 +192,7 @@ SampleForgeEditor::~SampleForgeEditor()
 
 void SampleForgeEditor::selectBank (int b)
 {
+    proc.uiBank = b;
     for (int i = 0; i < sf::numBanks; ++i) if (i != b) heldKeys.erase (i);
     bank = b;
     bankBtns[(size_t) b].setToggleState (true, juce::dontSendNotification);
@@ -303,6 +310,9 @@ void SampleForgeEditor::mouseDown (const juce::MouseEvent& e)
 
 void SampleForgeEditor::timerCallback()
 {
+    if (const auto name = proc.controllerName(); name.isNotEmpty()) ledBtn.setButtonText ("LED: " + name);
+    else ledBtn.setButtonText ("LED CONTROLLER");
+
     for (int i = 0; i < sf::padsPerBank; ++i)
     {
         const int idx = bank * sf::padsPerBank + i;
@@ -471,6 +481,8 @@ void SampleForgeEditor::resized()
     {
         auto h = headerArea.withTrimmedTop (8).removeFromTop (34);
         panicBtn.setBounds (h.removeFromRight (110));
+        h.removeFromRight (10);
+        ledBtn.setBounds (h.removeFromRight (190));
         h.removeFromRight (10);
         loadBtn.setBounds (h.removeFromRight (220));
     }

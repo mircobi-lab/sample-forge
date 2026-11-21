@@ -56,6 +56,7 @@ private:
     mbstudio::ui::HardwareLookAndFeel lnf;
 
     juce::TextButton loadBtn { "CARICA BRANO / STEM" }, panicBtn { "PANIC" }, origBtn { "ASCOLTA ORIGINALE" };
+    juce::ToggleButton ledBtn { "LED CONTROLLER" };
     std::array<juce::TextButton, sf::numBanks> bankBtns;
     std::array<std::unique_ptr<PadView>, sf::padsPerBank> padViews;
 

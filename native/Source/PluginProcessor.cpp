@@ -58,11 +58,35 @@ SampleForgeProcessor::SampleForgeProcessor()
       juce::Thread ("Sample Forge analisi")
 {
     formats.registerBasicFormats();
+
+    ControllerLeds::Host h;
+    h.padState = [this] (int p) { return padState (p); };
+    h.currentBank = [this] { return uiBank.load(); };
+    leds = std::make_unique<ControllerLeds> (std::move (h));
+    if (juce::SystemStats::getEnvironmentVariable ("SF_NO_LEDS", {}).isNotEmpty()) ledsWanted = false;
+    setControllerLeds (ledsWanted);
+}
+
+void SampleForgeProcessor::setControllerLeds (bool on)
+{
+    ledsWanted = on;
+    if (leds != nullptr) leds->setEnabled (on);
+}
+
+ControllerLeds::PadState SampleForgeProcessor::padState (int pad) const
+{
+    using S = ControllerLeds::PadState;
+    if (pad < 0 || pad >= sf::numPads || result == nullptr) return S::empty;
+    if (! result->banks[(size_t) (pad / sf::padsPerBank)].pads[(size_t) (pad % sf::padsPerBank)]) return S::empty;
+    if (sampler.latched[(size_t) pad].load()) return S::latched;
+    if (sampler.playhead[(size_t) pad].load() >= 0) return S::playing;
+    return S::loaded;
 }
 
 SampleForgeProcessor::~SampleForgeProcessor()
 {
     cancel = true;
+    leds.reset();
     stopThread (10000);
     cancelPendingUpdate();
 }
@@ -140,12 +164,14 @@ void SampleForgeProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
 // ---------------------------------------------------------------- interfaccia -> audio
 void SampleForgeProcessor::padDown (int pad)
 {
+    const juce::SpinLock::ScopedLockType sl (fifoWriteLock);
     const auto scope = fifo.write (1);
     if (scope.blockSize1 > 0) events[(size_t) scope.startIndex1] = { 0, pad };
     else if (scope.blockSize2 > 0) events[(size_t) scope.startIndex2] = { 0, pad };
 }
 void SampleForgeProcessor::padUp (int pad)
 {
+    const juce::SpinLock::ScopedLockType sl (fifoWriteLock);
     const auto scope = fifo.write (1);
     if (scope.blockSize1 > 0) events[(size_t) scope.startIndex1] = { 1, pad };
     else if (scope.blockSize2 > 0) events[(size_t) scope.startIndex2] = { 1, pad };
@@ -484,6 +510,7 @@ void SampleForgeProcessor::getStateInformation (juce::MemoryBlock& dest)
         c.setProperty ("mode", s.mode.load(), nullptr); c.setProperty ("choke", s.choke.load(), nullptr);
         t.appendChild (c, nullptr);
     }
+    t.setProperty ("leds", ledsWanted, nullptr);
     juce::MemoryOutputStream mo (dest, false);
     t.writeToStream (mo);
 }
@@ -492,6 +519,7 @@ void SampleForgeProcessor::setStateInformation (const void* data, int size)
 {
     auto t = juce::ValueTree::readFromData (data, (size_t) size);
     if (! t.hasType ("SampleForge")) return;
+    setControllerLeds ((bool) t.getProperty ("leds", ledsWanted));
     for (int b = 0; b < sf::numBanks && b < t.getNumChildren(); ++b)
     {
         auto c = t.getChild (b); auto& s = sampler.settings[(size_t) b];

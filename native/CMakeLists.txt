@@ -70,6 +70,7 @@ include(MBStudioUI/MBStudioUI.cmake)
 mbstudio_ui_add(SampleForge)
 
 target_sources(SampleForge PRIVATE
+    Source/ControllerLeds.cpp
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp)
 
@@ -95,7 +96,7 @@ target_link_libraries(SampleForge
 
 # Prova del processore senza interfaccia (caricamento, pad, MIDI, PANIC, export)
 juce_add_console_app(SampleForgePluginTest PRODUCT_NAME "sf_plugin_test")
-target_sources(SampleForgePluginTest PRIVATE tests/plugin_test.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp)
+target_sources(SampleForgePluginTest PRIVATE tests/plugin_test.cpp Source/ControllerLeds.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp)
 mbstudio_ui_add(SampleForgePluginTest)
 target_compile_definitions(SampleForgePluginTest PRIVATE
     JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_USE_MP3AUDIOFORMAT=1 JUCE_USE_FLAC=1 JUCE_USE_OGGVORBIS=1

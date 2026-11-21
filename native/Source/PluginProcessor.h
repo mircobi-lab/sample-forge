@@ -4,6 +4,7 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 #include "Sampler.h"
 #include "Engine/SampleForgeEngine.h"
+#include "ControllerLeds.h"
 
 class SampleForgeProcessor : public juce::AudioProcessor, private juce::Thread, private juce::AsyncUpdater
 {
@@ -59,6 +60,13 @@ public:
 
     sf::Sampler sampler;
 
+    // ---- LED dei pad sul controller (Push, Launchpad, Launchkey)
+    void setControllerLeds (bool on);
+    bool controllerLedsOn() const { return ledsWanted; }
+    juce::String controllerName() const { return leds != nullptr ? leds->getDeviceName() : juce::String(); }
+    ControllerLeds::PadState padState (int pad) const;
+    std::atomic<int> uiBank { 0 };            // banco mostrato (interfaccia <-> tasti banco del controller)
+
 private:
     // ---- lavori in background
     enum class Job { none, analyze, reslice, exportZip };
@@ -102,9 +110,12 @@ private:
     // eventi dall'interfaccia al thread audio
     struct Event { int type; int pad; };   // 0 down, 1 up
     juce::AbstractFifo fifo { 256 };
+    juce::SpinLock fifoWriteLock;          // scrivono interfaccia e porta MIDI del controller
     std::array<Event, 256> events;
     std::atomic<bool> panicRequested { false };
     double deviceRate = 44100;
+    std::unique_ptr<ControllerLeds> leds;
+    bool ledsWanted = true;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SampleForgeProcessor)
 };
