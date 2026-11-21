@@ -6,6 +6,10 @@ L'app separa il brano in batteria, voce, basso e accordi, ne trova BPM, tonalit√
 
 L'interfaccia usa lo stile hardware MBStudio91 (telaio nero, serigrafia bianca, LED), lo stesso dei plugin VST.
 
+## Versione nativa (senza browser)
+
+Nella cartella [`native/`](native/) c'√® Sample Forge riscritto in C++ con JUCE: app Standalone, VST3 e AU, con lo stesso stile hardware dei plugin MBStudio91. I file pronti per Mac, Windows e Linux escono dalla compilazione *Native (C++)* nella pagina **Releases**.
+
 ## Motori di separazione
 
 - **Rapido, nel browser**: separazione DSP approssimativa (maschere di Wiener a 4 sorgenti, coerenza stereo, HPSS a due scale). Il brano non lascia il computer.

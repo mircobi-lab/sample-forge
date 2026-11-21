@@ -1,0 +1,154 @@
+name: Native (C++)
+
+on:
+  push:
+    branches: [main]
+    paths: ['native/**', 'tests/gen.mjs', '.github/workflows/native.yml']
+    tags: ['native-v*']
+  pull_request:
+    paths: ['native/**']
+  workflow_dispatch:
+
+concurrency:
+  group: native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  engine:
+    name: Motore DSP (prova sui brani con stem noti)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: Brani di prova
+        working-directory: native
+        run: node tests/dump_songs.mjs testdata
+      - name: Compila solo il motore
+        working-directory: native
+        run: |
+          cmake -B build-engine -DSF_ENGINE_ONLY=ON -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-engine --target sf_engine_cli
+      - name: Prova
+        working-directory: native
+        run: |
+          ./build-engine/sf_engine_cli testdata/song1 --expect-bpm 100 --min-sdr 3.0
+          ./build-engine/sf_engine_cli testdata/song2 --expect-bpm 128 --min-sdr 3.0
+          ./build-engine/sf_engine_cli testdata/song1 --stems --expect-bpm 100 --expect-key Dm
+
+  linux:
+    name: Linux (VST3, Standalone, prove)
+    needs: engine
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: Dipendenze
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxext-dev libxcomposite-dev libxi-dev libfreetype6-dev libfontconfig1-dev libgl1-mesa-dev xvfb ninja-build
+      - name: Compila
+        working-directory: native
+        env: { CPATH: /usr/include/freetype2 }
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --target SampleForge_Standalone SampleForge_VST3 SampleForgePluginTest
+      - name: Prova del processore (pad, MIDI, PANIC, export)
+        working-directory: native
+        run: |
+          node tests/dump_songs.mjs testdata
+          ./build/SampleForgePluginTest_artefacts/Release/SampleForgePluginTest testdata/song1/mix.wav /tmp/pack.zip
+      - name: Schermata dell'app
+        working-directory: native
+        run: |
+          SF_AUTOLOAD="$PWD/testdata/song1/mix.wav" SF_SCREENSHOT="$PWD/screenshot-linux.png" \
+            timeout 180 xvfb-run -a -s "-screen 0 1400x1000x24" "./build/SampleForge_artefacts/Release/Standalone/Sample Forge" | grep -E "SCREENSHOT|RISULTATO"
+          test -s screenshot-linux.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SampleForge-Linux
+          path: |
+            native/build/SampleForge_artefacts/Release/VST3/
+            native/build/SampleForge_artefacts/Release/Standalone/
+            native/screenshot-linux.png
+
+  mac:
+    name: macOS universale (Intel + Apple Silicon)
+    needs: engine
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configura
+        working-directory: native
+        run: cmake -B build -G Xcode -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+      - name: Compila
+        working-directory: native
+        run: cmake --build build --config Release --target SampleForge_Standalone SampleForge_VST3 SampleForge_AU --parallel 3
+      - name: Firma ad-hoc e pacchetti
+        working-directory: native/build/SampleForge_artefacts/Release
+        run: |
+          for b in "Standalone/Sample Forge.app" "VST3/Sample Forge.vst3" "AU/Sample Forge.component"; do
+            codesign --force --deep --sign - "$b"
+            codesign --verify --verbose=2 "$b"
+          done
+          lipo -info "Standalone/Sample Forge.app/Contents/MacOS/Sample Forge"
+          ditto -c -k --keepParent "Standalone/Sample Forge.app" "SampleForge-macOS-App.zip"
+          ditto -c -k --keepParent "VST3/Sample Forge.vst3" "SampleForge-macOS-VST3.zip"
+          ditto -c -k --keepParent "AU/Sample Forge.component" "SampleForge-macOS-AU.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SampleForge-macOS
+          path: native/build/SampleForge_artefacts/Release/*.zip
+
+  windows:
+    name: Windows (x64)
+    needs: engine
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compila
+        working-directory: native
+        run: |
+          cmake -B build -A x64
+          cmake --build build --config Release --target SampleForge_Standalone SampleForge_VST3 --parallel 3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SampleForge-Windows
+          path: |
+            native/build/SampleForge_artefacts/Release/VST3/
+            native/build/SampleForge_artefacts/Release/Standalone/
+
+  release:
+    name: Pubblica in Releases
+    if: github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/native-v') || github.ref == 'refs/heads/main')
+    needs: [linux, mac, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dist }
+      - name: Zip Windows e Linux
+        run: |
+          cd dist
+          (cd SampleForge-Windows && zip -qr ../SampleForge-Windows.zip .)
+          (cd SampleForge-Linux && zip -qr ../SampleForge-Linux.zip . -x screenshot-linux.png)
+          cp SampleForge-Linux/screenshot-linux.png screenshot.png
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('native-v2.0.{0}', github.run_number) }}
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          name: ${{ startsWith(github.ref, 'refs/tags/') && format('Sample Forge nativo {0}', github.ref_name) || format('Sample Forge nativo 2.0.{0}', github.run_number) }}
+          body: |
+            Sample Forge in C++ (JUCE), senza browser. Compilato automaticamente dal commit ${{ github.sha }}.
+            - Mac (Intel e Apple Silicon): SampleForge-macOS-App.zip (app), -VST3.zip, -AU.zip.
+              Prima apertura: clic destro > Apri. Se macOS dice che e' danneggiata: xattr -dr com.apple.quarantine "/Applications/Sample Forge.app"
+            - Windows: SampleForge-Windows.zip (app e VST3).
+            - Linux: SampleForge-Linux.zip (app e VST3).
+          files: |
+            dist/SampleForge-macOS/*.zip
+            dist/SampleForge-Windows.zip
+            dist/SampleForge-Linux.zip
+            dist/screenshot.png
