@@ -104,3 +104,9 @@ target_compile_definitions(SampleForgePluginTest PRIVATE
 target_link_libraries(SampleForgePluginTest PRIVATE
     sf_engine juce::juce_audio_utils juce::juce_audio_formats juce::juce_audio_processors juce::juce_gui_extra
     juce::juce_recommended_config_flags)
+
+# Test della mappatura dei controller (nessun hardware richiesto)
+juce_add_console_app(sf_controller_test PRODUCT_NAME "sf_controller_test")
+target_sources(sf_controller_test PRIVATE tests/controller_test.cpp Source/ControllerLeds.cpp)
+target_link_libraries(sf_controller_test PRIVATE
+    juce::juce_audio_devices juce::juce_events juce::juce_core juce::juce_recommended_config_flags)
