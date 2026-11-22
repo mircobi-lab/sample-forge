@@ -91,7 +91,7 @@ int ControllerLeds::padNote (Kind k, int pad, int shownBank)
     {
         case Kind::push:             return 36 + pad;
         case Kind::launchpadMk3:     return 10 * (b + 1) + c + 1;
-        case Kind::launchpadClassic: return 16 * (7 - b) + c;
+        case Kind::launchpadClassic: return 16 * b + c;          // X-Y: riga 0 in basso
         case Kind::launchkeyMk3:
         case Kind::launchkeyMk2:
         case Kind::launchkeyMk1:     return b == shownBank ? 112 + c : -1;
@@ -106,12 +106,19 @@ int ControllerLeds::bankNote (Kind k, int bank)
     {
         case Kind::push:             return 92 + bank;     // riga in alto (92-99)
         case Kind::launchpadMk3:     return 81 + bank;
-        case Kind::launchpadClassic: return bank;          // riga 0 = in alto
+        case Kind::launchpadClassic: return 16 * bank + 8;      // colonna delle scene a destra
         case Kind::launchkeyMk3:
         case Kind::launchkeyMk2:
         case Kind::launchkeyMk1:     return 96 + bank;
         case Kind::none: default:    return -1;
     }
+}
+
+int ControllerLeds::decodeInput (Kind k, int note, int shownBank)
+{
+    for (int b = 0; b < 5; ++b) if (bankNote (k, b) == note) return -1 - b;
+    for (int p = 0; p < 40; ++p) if (padNote (k, p, shownBank) == note) return p;
+    return -100;
 }
 
 int ControllerLeds::paletteValue (Kind k, Col c)
@@ -212,12 +219,23 @@ void ControllerLeds::open (Kind k, const juce::MidiDeviceInfo& outInfo)
     kind = k; outId = outInfo.identifier; deviceName = kindName (k);
     sent.fill (-1);
 
+    // Ingresso: stesso controller, porta IN con lo stesso riconoscimento. Push 2 non passa di qui.
+    if (k != Kind::push)
+        for (auto& d : juce::MidiInput::getAvailableDevices())
+            if (detect (d.name) == k)
+            {
+                in = juce::MidiInput::openDevice (d.identifier, this);
+                if (in != nullptr) in->start();
+                break;
+            }
+
     sendModeOn();
     refresh (true);
 }
 
 void ControllerLeds::close()
 {
+    if (in != nullptr) { in->stop(); in.reset(); }
     if (out != nullptr)
     {
         std::vector<std::pair<int, Col>> offs;
@@ -332,3 +350,18 @@ void ControllerLeds::refresh (bool force)
     sendNotes (changes);
 }
 
+
+void ControllerLeds::handleIncomingMidiMessage (juce::MidiInput*, const juce::MidiMessage& m)
+{
+    if (! (m.isNoteOn() || m.isNoteOff())) return;
+    const int code = decodeInput (kind, m.getNoteNumber(), host.currentBank ? host.currentBank() : 0);
+    if (code == -100) return;
+    const bool down = m.isNoteOn();
+    if (code < 0)
+    {
+        if (down && host.selectBank) host.selectBank (-1 - code);
+        return;
+    }
+    if (down) { if (host.padDown) host.padDown (code); }
+    else if (host.padUp) host.padUp (code);
+}

@@ -62,6 +62,9 @@ SampleForgeProcessor::SampleForgeProcessor()
     ControllerLeds::Host h;
     h.padState = [this] (int p) { return padState (p); };
     h.currentBank = [this] { return uiBank.load(); };
+    h.padDown = [this] (int p) { padDown (p); };
+    h.padUp = [this] (int p) { padUp (p); };
+    h.selectBank = [this] (int b) { uiBank = b; };
     leds = std::make_unique<ControllerLeds> (std::move (h));
     if (juce::SystemStats::getEnvironmentVariable ("SF_NO_LEDS", {}).isNotEmpty()) ledsWanted = false;
     setControllerLeds (ledsWanted);

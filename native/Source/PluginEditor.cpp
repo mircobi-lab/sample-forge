@@ -310,6 +310,7 @@ void SampleForgeEditor::mouseDown (const juce::MouseEvent& e)
 
 void SampleForgeEditor::timerCallback()
 {
+    if (const int ctrlBank = proc.uiBank.load(); ctrlBank != bank) selectBank (ctrlBank);   // banco scelto sul controller
     if (const auto name = proc.controllerName(); name.isNotEmpty()) ledBtn.setButtonText ("LED: " + name);
     else ledBtn.setButtonText ("LED CONTROLLER");
 
