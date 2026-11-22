@@ -351,11 +351,19 @@ void ControllerLeds::refresh (bool force)
 }
 
 
+bool ControllerLeds::claimedRecently (int note) const
+{
+    if (note < 0 || note >= 128) return false;
+    const auto stamp = claimedAt[(size_t) note].load();
+    return stamp != 0 && (juce::Time::getMillisecondCounter() + 1 - stamp) < 250u;
+}
+
 void ControllerLeds::handleIncomingMidiMessage (juce::MidiInput*, const juce::MidiMessage& m)
 {
     if (! (m.isNoteOn() || m.isNoteOff())) return;
     const int code = decodeInput (kind, m.getNoteNumber(), host.currentBank ? host.currentBank() : 0);
     if (code == -100) return;
+    claimedAt[(size_t) m.getNoteNumber()] = juce::Time::getMillisecondCounter() + 1;
     const bool down = m.isNoteOn();
     if (code < 0)
     {

@@ -130,6 +130,7 @@ void SampleForgeProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
         const auto m = meta.getMessage();
         const int at = juce::jlimit (0, n, meta.samplePosition);
         if (at > pos) { sampler.render (set, buffer, pos, at - pos); pos = at; }
+        if ((m.isNoteOn() || m.isNoteOff()) && leds != nullptr && leds->claimedRecently (m.getNoteNumber())) continue;   // gia' gestita dal controller
         if (m.isNoteOn()) sampler.noteOn (set, m.getNoteNumber() - sf::firstMidiNote, m.getFloatVelocity());
         else if (m.isNoteOff()) sampler.noteOff (m.getNoteNumber() - sf::firstMidiNote);
         else if (m.isController() && (m.getControllerNumber() == 120 || m.getControllerNumber() == 123)) { sampler.panic(); originalPos = -1.0; }

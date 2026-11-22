@@ -34,6 +34,10 @@ public:
     juce::String getDeviceName() const { return deviceName; }
     Kind getKind() const { return kind; }
 
+    /** True se questa nota e' appena arrivata da un controller che Sample Forge gestisce:
+        il processore la salta, cosi' un pad non suona due volte (una dal controller, una dalla porta MIDI). */
+    bool claimedRecently (int note) const;
+
     // ---- traduzione (statiche, usate anche dai test)
     static Kind detect (const juce::String& portName);
     static juce::String kindName (Kind);
@@ -65,6 +69,7 @@ private:
     juce::String deviceName, outId;
     std::unique_ptr<juce::MidiOutput> out;
     std::unique_ptr<juce::MidiInput> in;
+    std::array<std::atomic<uint32_t>, 128> claimedAt {};   // millisecondi + 1, 0 = mai
     std::array<int, 128> sent {};        // ultimo colore inviato per nota (-1 = da inviare)
     int scanCountdown = 0, refreshCountdown = 0;
 
