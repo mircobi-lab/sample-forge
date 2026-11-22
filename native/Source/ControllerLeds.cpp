@@ -210,6 +210,11 @@ void ControllerLeds::scan()
     for (auto want : { Kind::push, Kind::launchpadMk3, Kind::launchpadClassic, Kind::launchkeyMk3, Kind::launchkeyMk2, Kind::launchkeyMk1 })
         for (auto& d : outs)
             if (detect (d.name) == want) { open (want, d); return; }
+
+    // Fallback Launchkey MK3: alcune versioni chiamano la porta OUT senza "DAW". I LED in modo DAW
+    // passano comunque dalla porta che il sistema espone come Launchkey MK3 OUT.
+    for (auto& d : outs)
+        if (has (d.name.toLowerCase(), "launchkey") && has (d.name.toLowerCase(), "mk3")) { open (Kind::launchkeyMk3, d); return; }
 }
 
 void ControllerLeds::open (Kind k, const juce::MidiDeviceInfo& outInfo)
