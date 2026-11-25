@@ -3,6 +3,8 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 #include "Sampler.h"
+#include "StepSeq.h"
+#include "Mvsep.h"
 #include "Engine/SampleForgeEngine.h"
 #include "ControllerLeds.h"
 
@@ -43,8 +45,10 @@ public:
     /** Carica uno o piu' file: un mix (separazione interna) o gli stem (riconosciuti dal nome). */
     void loadFiles (const juce::Array<juce::File>& files);
     void reslice (double bpm);
+    /** Genera il brano di prova sintetico (112 BPM, Am-F-C-G) e lo analizza. */
+    void loadDemo();
     /** Esporta il pacchetto zip in un file (in background). */
-    struct ExportOptions { int bits = 24; bool copy432 = false; bool stems = false; };
+    struct ExportOptions { int bits = 24; bool copy432 = false; bool stems = false; bool seqLoop = true; };
     void exportPack (const juce::File& zipFile, ExportOptions);
 
     // ---- stato per l'interfaccia (thread dei messaggi)
@@ -59,6 +63,9 @@ public:
     std::function<void (juce::String)> onToast;
 
     sf::Sampler sampler;
+    sf::SeqData seq;                          // sequenza (salvata col progetto)
+    sf::SeqEngine seqEngine;
+    sf::MvsepSettings mvsep;                  // chiave e scelte di MVSep (file di impostazioni locale)
 
     // ---- LED dei pad sul controller (Push, Launchpad, Launchkey)
     void setControllerLeds (bool on);
@@ -69,12 +76,18 @@ public:
 
 private:
     // ---- lavori in background
-    enum class Job { none, analyze, reslice, exportZip };
+    enum class Job { none, analyze, reslice, exportZip, mvsep, demo };
     void run() override;
     void handleAsyncUpdate() override;
     void setStatus (bool busy, double p, const juce::String& msg);
     void doAnalyze();
     void doExport();
+    void doMvsep();
+    void doDemo();
+    std::unique_ptr<sf::PadSet> makePadSet (const sf::Result&) const;
+    juce::String nameOverride;                // nome del brano quando non viene dal file (prova, MVSep)
+    sf::Click click;
+    std::array<sf::SeqEngine::Hit, 512> seqHits;
     void installResult (std::shared_ptr<sf::Result>);
 
     juce::AudioFormatManager formats;

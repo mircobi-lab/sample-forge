@@ -24,6 +24,29 @@ private:
     float playhead = -1; bool lit = false, pressed = false;
 };
 
+/** Griglia della sequenza: 8 righe (i pad del banco scelto) x 16 passi della battuta scelta.
+    Clic accende o spegne il passo, trascinando si dipinge la riga; la colonna del passo che suona si accende. */
+class SeqGridView : public juce::Component
+{
+public:
+    explicit SeqGridView (SampleForgeProcessor& p) : proc (p) {}
+    void setBank (int b) { bank = b; repaint(); }
+    void setBar (int b) { bar = b; repaint(); }
+    int getBar() const { return bar; }
+    void setLabels (std::array<juce::String, sf::padsPerBank> l) { labels = std::move (l); repaint(); }
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override { paintValue = -1; }
+    static constexpr int labelW = 150;
+private:
+    SampleForgeProcessor& proc;
+    int bank = 0, bar = 0, paintValue = -1, lastCell = -1;
+    std::array<juce::String, sf::padsPerBank> labels;
+    juce::Rectangle<float> cell (int row, int col) const;
+    bool hit (juce::Point<int>, int& row, int& col) const;
+};
+
 class SampleForgeEditor : public juce::AudioProcessorEditor, public juce::FileDragAndDropTarget, private juce::Timer
 {
 public:
@@ -55,7 +78,21 @@ private:
     SampleForgeProcessor& proc;
     mbstudio::ui::HardwareLookAndFeel lnf;
 
-    juce::TextButton loadBtn { "CARICA BRANO / STEM" }, panicBtn { "PANIC" }, origBtn { "ASCOLTA ORIGINALE" };
+    juce::TextButton loadBtn { "CARICA BRANO" }, panicBtn { "PANIC" }, origBtn { "ASCOLTA ORIGINALE" },
+                     demoBtn { "BRANO DI PROVA" }, mvsepBtn { "MVSEP" };
+
+    // sequenza
+    SeqGridView seqGrid { proc };
+    juce::TextButton viewPads { "PAD" }, viewSeq { "SEQUENZA" }, playBtn { "PLAY" }, recBtn { "REC" }, metroBtn { "METRO" },
+                     muteBankBtn { "MUTE BANCO" }, clearBankBtn { "PULISCI BANCO" };
+    std::array<juce::TextButton, sf::maxBars> barBtns;
+    juce::ComboBox barsBox, quantBox;
+    juce::Slider swingSlider;
+    juce::ToggleButton optLoop { "LOOP DELLA SEQUENZA" };
+    bool seqView = false;
+    void setSeqView (bool);
+    void refreshSeqLabels();
+    void openMvsepSettings();
     juce::ToggleButton ledBtn { "LED CONTROLLER" };
     std::array<juce::TextButton, sf::numBanks> bankBtns;
     std::array<std::unique_ptr<PadView>, sf::padsPerBank> padViews;

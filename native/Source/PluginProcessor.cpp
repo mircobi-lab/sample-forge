@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "Demo.h"
 #include <map>
 
 namespace
@@ -58,6 +59,7 @@ SampleForgeProcessor::SampleForgeProcessor()
       juce::Thread ("Sample Forge analisi")
 {
     formats.registerBasicFormats();
+    mvsep.load();
 
     ControllerLeds::Host h;
     h.padState = [this] (int p) { return padState (p); };
@@ -103,6 +105,7 @@ void SampleForgeProcessor::prepareToPlay (double sampleRate, int)
 {
     deviceRate = sampleRate;
     sampler.prepare (sampleRate);
+    seqEngine.prepare (sampleRate);
 }
 
 void SampleForgeProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
@@ -112,30 +115,68 @@ void SampleForgeProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
     const juce::SpinLock::ScopedTryLockType lock (padLock);
     const sf::PadSet* set = lock.isLocked() ? pads.get() : nullptr;
 
-    if (panicRequested.exchange (false)) { sampler.panic(); originalPos = -1.0; }
+    if (panicRequested.exchange (false)) { sampler.panic(); originalPos = -1.0; seq.playing = false; seq.rec = false; }
 
-    // eventi dall'interfaccia (tasti A-K, clic sui pad)
+    // trasporto della DAW (se suona, il sequencer la segue)
+    const int n = buffer.getNumSamples();
+    double hostBpm = 0, hostPpq = 0;
+    bool hostPlaying = false;
+    if (auto* ph = getPlayHead())
+        if (auto pos = ph->getPosition())
+        {
+            if (auto b = pos->getBpm()) hostBpm = *b;
+            if (auto p = pos->getPpqPosition()) hostPpq = *p;
+            hostPlaying = pos->getIsPlaying() && pos->getPpqPosition().hasValue() && hostBpm > 0;
+        }
+    const int numHits = seqEngine.process (seq, n, hostPlaying, hostBpm, hostPpq, seqHits);
+
+    // eventi dall'interfaccia (tasti A-K, clic sui pad): suonano a inizio blocco e, in REC, si registrano
     {
         const auto scope = fifo.read (fifo.getNumReady());
-        auto handle = [&] (int start, int n) { for (int i = 0; i < n; ++i) { const auto& e = events[(size_t) (start + i)]; if (e.type == 0) sampler.noteOn (set, e.pad); else sampler.noteOff (e.pad); } };
+        auto handle = [&] (int start, int cnt)
+        {
+            for (int i = 0; i < cnt; ++i)
+            {
+                const auto& e = events[(size_t) (start + i)];
+                if (e.type == 0) { sampler.noteOn (set, e.pad); seqEngine.record (seq, e.pad, 0); }
+                else sampler.noteOff (e.pad);
+            }
+        };
         handle (scope.startIndex1, scope.blockSize1);
         handle (scope.startIndex2, scope.blockSize2);
     }
 
-    // MIDI: note 36-75 = banco 1 pad A ... banco 5 pad K; CC 120/123 = PANIC
-    int pos = 0;
-    const int n = buffer.getNumSamples();
+    // MIDI (note 36-75 = banco 1 pad A ... banco 5 pad K; CC 120/123 = PANIC) e colpi del sequencer, in ordine di tempo
+    int pos = 0, hi = 0;
+    auto renderTo = [&] (int at) { if (at > pos) { sampler.render (set, buffer, pos, at - pos); click.render (buffer, pos, at - pos); pos = at; } };
+    auto seqUntil = [&] (int at)
+    {
+        for (; hi < numHits && seqHits[(size_t) hi].offset <= at; ++hi)
+        {
+            const auto& h = seqHits[(size_t) hi];
+            renderTo (h.offset);
+            if (h.pad < 0) click.trigger (h.pad == -2, deviceRate);
+            else sampler.noteOn (set, h.pad, 1.f);
+        }
+    };
     for (const auto meta : midi)
     {
         const auto m = meta.getMessage();
         const int at = juce::jlimit (0, n, meta.samplePosition);
-        if (at > pos) { sampler.render (set, buffer, pos, at - pos); pos = at; }
+        seqUntil (at - 1);
+        renderTo (at);
         if ((m.isNoteOn() || m.isNoteOff()) && leds != nullptr && leds->claimedRecently (m.getNoteNumber())) continue;   // gia' gestita dal controller
-        if (m.isNoteOn()) sampler.noteOn (set, m.getNoteNumber() - sf::firstMidiNote, m.getFloatVelocity());
+        if (m.isNoteOn())
+        {
+            const int pad = m.getNoteNumber() - sf::firstMidiNote;
+            sampler.noteOn (set, pad, m.getFloatVelocity());
+            seqEngine.record (seq, pad, at);
+        }
         else if (m.isNoteOff()) sampler.noteOff (m.getNoteNumber() - sf::firstMidiNote);
-        else if (m.isController() && (m.getControllerNumber() == 120 || m.getControllerNumber() == 123)) { sampler.panic(); originalPos = -1.0; }
+        else if (m.isController() && (m.getControllerNumber() == 120 || m.getControllerNumber() == 123)) { sampler.panic(); originalPos = -1.0; seq.playing = false; }
     }
-    if (pos < n) sampler.render (set, buffer, pos, n - pos);
+    seqUntil (n);
+    renderTo (n);
     midi.clear();
 
     // ascolto del brano originale
@@ -205,8 +246,24 @@ void SampleForgeProcessor::setStatus (bool busy, double p, const juce::String& m
 void SampleForgeProcessor::loadFiles (const juce::Array<juce::File>& files)
 {
     if (isThreadRunning()) { if (onToast) onToast (juce::String::fromUTF8 ("Attendi la fine dell'operazione in corso")); return; }
+    if (mvsep.enabled && files.size() == 1)
+    {
+        // un brano solo con MVSep acceso: lo separa MVSep, poi si analizzano gli stem
+        pendingFiles = files; job = Job::mvsep; cancel = false;
+        setStatus (true, 0.01, "Preparo l'invio a MVSep");
+        startThread (juce::Thread::Priority::normal);
+        return;
+    }
     pendingFiles = files; job = Job::analyze; cancel = false;
     setStatus (true, 0.01, "Decodifico l'audio");
+    startThread (juce::Thread::Priority::normal);
+}
+
+void SampleForgeProcessor::loadDemo()
+{
+    if (isThreadRunning()) { if (onToast) onToast (juce::String::fromUTF8 ("Attendi la fine dell'operazione in corso")); return; }
+    job = Job::demo; cancel = false;
+    setStatus (true, 0.01, "Genero il brano di prova");
     startThread (juce::Thread::Priority::normal);
 }
 
@@ -238,6 +295,8 @@ void SampleForgeProcessor::run()
             pendingResult = r;
         }
         else if (job == Job::exportZip) doExport();
+        else if (job == Job::mvsep) doMvsep();
+        else if (job == Job::demo) doDemo();
     }
     catch (const std::exception& e) { jobError = juce::String::fromUTF8 (e.what()); }
     triggerAsyncUpdate();
@@ -335,18 +394,19 @@ void SampleForgeProcessor::doAnalyze()
         original = std::move (full); originalRate = rate; originalPos = -1.0;
     }
     pendingResult = r;
-    pendingSongName = name;
+    pendingSongName = nameOverride.isNotEmpty() ? nameOverride : name;
+    nameOverride.clear();
     pendingOverview = std::move (ov);
 }
 
-void SampleForgeProcessor::installResult (std::shared_ptr<sf::Result> r)
+std::unique_ptr<sf::PadSet> SampleForgeProcessor::makePadSet (const sf::Result& rr) const
 {
     auto set = std::make_unique<sf::PadSet>();
-    set->sampleRate = r->sr;
+    set->sampleRate = rr.sr;
     for (int b = 0; b < sf::numBanks; ++b)
         for (int p = 0; p < sf::padsPerBank; ++p)
         {
-            const auto& pad = r->banks[(size_t) b].pads[(size_t) p];
+            const auto& pad = rr.banks[(size_t) b].pads[(size_t) p];
             auto& buf = set->buffers[(size_t) (b * sf::padsPerBank + p)];
             if (pad == nullptr) continue;
             const int len = (int) pad->audio.L.size();
@@ -355,6 +415,12 @@ void SampleForgeProcessor::installResult (std::shared_ptr<sf::Result> r)
             buf.copyFrom (1, 0, pad->audio.R.data(), len);
             set->loopable[(size_t) (b * sf::padsPerBank + p)] = pad->loop;
         }
+    return set;
+}
+
+void SampleForgeProcessor::installResult (std::shared_ptr<sf::Result> r)
+{
+    auto set = makePadSet (*r);
     {
         const juce::SpinLock::ScopedLockType sl (padLock);
         retired = std::move (pads);
@@ -373,11 +439,12 @@ void SampleForgeProcessor::handleAsyncUpdate()
         setStatus (false, -1, "Errore: " + jobError);
         if (onToast) onToast (jobError);
     }
-    else if (job == Job::analyze || job == Job::reslice)
+    else if (job == Job::analyze || job == Job::reslice || job == Job::mvsep || job == Job::demo)
     {
-        if (job == Job::analyze) { songName = pendingSongName; overview = std::move (pendingOverview); songDuration = original.getNumSamples() / originalRate; }
+        if (job == Job::analyze || job == Job::mvsep || job == Job::demo) { songName = pendingSongName; overview = std::move (pendingOverview); songDuration = original.getNumSamples() / originalRate; }
         installResult (pendingResult);
         pendingResult.reset();
+        seq.bpm = (float) juce::jlimit (40.0, 300.0, result->bpm);   // il tempo della sequenza segue quello del brano (anche dopo RITAGLIA)
         int n = 0; for (auto& b : result->banks) for (auto& p : b.pads) if (p) n++;
         juce::String msg = juce::String (n) + " campioni pronti";
         if (result->cappedSec > 0) msg << juce::String::fromUTF8 (" · analizzati i primi ") << juce::roundToInt (result->cappedSec / 60) << " minuti";
@@ -393,6 +460,37 @@ void SampleForgeProcessor::handleAsyncUpdate()
     }
     job = Job::none;
     if (onStateChanged) onStateChanged();
+}
+
+// ---------------------------------------------------------------- MVSep e brano di prova
+void SampleForgeProcessor::doMvsep()
+{
+    const auto song = pendingFiles[0];
+    const auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("SampleForge_MVSep")
+                         .getChildFile (juce::File::createLegalFileName (song.getFileNameWithoutExtension()));
+    dir.deleteRecursively();
+    auto stems = sf::mvsepSeparate (song, mvsep, dir, [this] (double p, const juce::String& m) { setStatus (true, p * .5, m); }, &cancel);
+    pendingFiles = stems;
+    nameOverride = song.getFileNameWithoutExtension();
+    jobInfo = "MVSep: " + juce::String (stems.size()) + " stem scaricati";
+    doAnalyze();
+}
+
+void SampleForgeProcessor::doDemo()
+{
+    auto b = sf::makeDemoSong (44100.0);
+    const auto f = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("SampleForge_brano_di_prova.wav");
+    f.deleteFile();
+    {
+        juce::WavAudioFormat wav;
+        std::unique_ptr<juce::OutputStream> os = std::make_unique<juce::FileOutputStream> (f);
+        auto w = wav.createWriterFor (os, juce::AudioFormatWriterOptions().withSampleRate (44100.0).withNumChannels (2).withBitsPerSample (24));
+        if (w == nullptr) throw std::runtime_error ("Impossibile scrivere il brano di prova.");
+        w->writeFromAudioSampleBuffer (b, 0, b.getNumSamples());
+    }
+    pendingFiles = { f };
+    nameOverride = juce::String::fromUTF8 ("Brano di prova (112 BPM, Am-F-C-G)");
+    doAnalyze();
 }
 
 // ---------------------------------------------------------------- export
@@ -422,6 +520,16 @@ void SampleForgeProcessor::doExport()
             items.push_back ({ juce::String (dirs[b]) + "/" + nm + ".wav", std::move (a), r->sr });
             lines.add (juce::String (dirs[b]) + "/" + nm + ".wav  -  " + label + ", " + juce::String (pad->dur, 3) + " s, preso a " + juce::String (pad->start, 2) + " s");
         }
+    if (pendingExport.seqLoop && ! seq.empty())
+    {
+        setStatus (true, 0.2, "Renderizzo la sequenza");
+        auto set = makePadSet (*r);
+        auto loop = sf::renderLoop (seq, *set, sampler.settings);
+        const juce::String sb = fmtBpm (seq.bpm.load());
+        const int nb = seq.total() / sf::stepsPerBar;
+        items.push_back ({ "06_Sequenza/Sequenza_" + juce::String (nb) + "batt_" + sb + "bpm_" + key + ".wav", std::move (loop), r->sr });
+        lines.add ("06_Sequenza  -  loop della sequenza, " + juce::String (nb) + " battute a " + sb + " BPM");
+    }
     if (pendingExport.stems)
     {
         const char* names[5][2] = { { "drums", "Batteria" }, { "vocals", "Voce" }, { "bass", "Basso" }, { "chords", "Accordi" }, { "inst", "Strumentale" } };
@@ -515,6 +623,7 @@ void SampleForgeProcessor::getStateInformation (juce::MemoryBlock& dest)
         t.appendChild (c, nullptr);
     }
     t.setProperty ("leds", ledsWanted, nullptr);
+    t.appendChild (seq.toValueTree(), nullptr);
     juce::MemoryOutputStream mo (dest, false);
     t.writeToStream (mo);
 }
@@ -524,6 +633,7 @@ void SampleForgeProcessor::setStateInformation (const void* data, int size)
     auto t = juce::ValueTree::readFromData (data, (size_t) size);
     if (! t.hasType ("SampleForge")) return;
     setControllerLeds ((bool) t.getProperty ("leds", ledsWanted));
+    if (auto sq = t.getChildWithName ("Seq"); sq.isValid()) seq.fromValueTree (sq);
     for (int b = 0; b < sf::numBanks && b < t.getNumChildren(); ++b)
     {
         auto c = t.getChild (b); auto& s = sampler.settings[(size_t) b];

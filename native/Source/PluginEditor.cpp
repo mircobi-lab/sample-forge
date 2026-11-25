@@ -11,6 +11,89 @@ juce::String u8 (const std::string& s) { return juce::String::fromUTF8 (s.c_str(
 juce::String fmtBpm (double b) { return std::abs (b - std::round (b)) < 1e-9 ? juce::String ((int) std::round (b)) : juce::String (b, 2); }
 }
 
+// ======================================================================== griglia della sequenza
+juce::Rectangle<float> SeqGridView::cell (int row, int col) const
+{
+    const float top = 22.f, gw = (float) (getWidth() - labelW - 4), gh = (float) getHeight() - top;
+    const float group = 6.f, cw = (gw - 3 * group) / 16.f, rh = gh / (float) sf::padsPerBank;
+    return { (float) labelW + col * cw + (float) (col / 4) * group, top + row * rh, cw, rh };
+}
+
+bool SeqGridView::hit (juce::Point<int> p, int& row, int& col) const
+{
+    for (int r = 0; r < sf::padsPerBank; ++r)
+        for (int c = 0; c < sf::stepsPerBar; ++c)
+            if (cell (r, c).contains (p.toFloat())) { row = r; col = c; return true; }
+    return false;
+}
+
+void SeqGridView::paint (juce::Graphics& g)
+{
+    ui::paintRecess (g, getLocalBounds().toFloat());
+    auto& sq = proc.seq;
+    const int total = sq.total(), now = proc.seqEngine.stepUi.load();
+    const bool muted = sq.mute[(size_t) bank].load();
+    const bool barInside = bar * sf::stepsPerBar < total;
+    // numeri dei passi e LED del passo che suona
+    for (int c = 0; c < sf::stepsPerBar; ++c)
+    {
+        const auto r = cell (0, c);
+        const int st = bar * sf::stepsPerBar + c;
+        g.setColour (C::printDim); g.setFont (ui::Fonts::label (11.f));
+        g.drawText (juce::String (c + 1), juce::Rectangle<float> (r.getX(), 3.f, r.getWidth() - 10.f, 16.f), juce::Justification::centred);
+        ui::paintLed (g, { r.getRight() - 7.f, 11.f }, 2.5f, C::ledGreen, st == now ? 1.f : 0.f);
+    }
+    for (int row = 0; row < sf::padsPerBank; ++row)
+    {
+        const int pad = bank * sf::padsPerBank + row;
+        const auto lab = juce::Rectangle<float> (10.f, cell (row, 0).getY(), (float) labelW - 16.f, cell (row, 0).getHeight());
+        g.setColour (C::print); g.setFont (ui::Fonts::display (15.f));
+        g.drawText (juce::String::charToString ((juce::juce_wchar) "ASDFGHJK"[row]), lab.withWidth (16.f), juce::Justification::centredLeft);
+        g.setColour (C::printDim); g.setFont (ui::Fonts::label (12.f));
+        g.drawFittedText (labels[(size_t) row].isNotEmpty() ? labels[(size_t) row] : juce::String ("-"), lab.withTrimmedLeft (22.f).toNearestInt(), juce::Justification::centredLeft, 1, .8f);
+        for (int c = 0; c < sf::stepsPerBar; ++c)
+        {
+            const int st = bar * sf::stepsPerBar + c;
+            auto r = cell (row, c).reduced (2.f, 2.f);
+            const bool on = sq.get (pad, st);
+            g.setColour (juce::Colour (st == now ? 0xff1d2125 : (c / 4) % 2 ? 0xff131416 : 0xff17181a));
+            g.fillRoundedRectangle (r, 2.f);
+            if (on)
+            {
+                const auto col = muted || ! barInside ? C::printDim.withAlpha (.5f) : C::ledGreen;
+                g.setColour (col.withAlpha (.25f)); g.fillRoundedRectangle (r.expanded (1.f), 3.f);
+                g.setColour (col); g.fillRoundedRectangle (r.reduced (3.f, r.getHeight() * .28f), 2.f);
+            }
+        }
+    }
+    if (! barInside)
+    {
+        g.setColour (juce::Colour (0xb0050506)); g.fillRect (getLocalBounds().withTrimmedLeft (labelW).toFloat());
+        g.setColour (C::printDim); g.setFont (ui::Fonts::label (14.f));
+        g.drawText ("BATTUTA FUORI DALLA SEQUENZA (BATTUTE = " + juce::String (total / sf::stepsPerBar) + ")", getLocalBounds().withTrimmedLeft (labelW), juce::Justification::centred);
+    }
+}
+
+void SeqGridView::mouseDown (const juce::MouseEvent& e)
+{
+    int r, c;
+    if (! hit (e.getPosition(), r, c)) return;
+    const int pad = bank * sf::padsPerBank + r, st = bar * sf::stepsPerBar + c;
+    paintValue = proc.seq.get (pad, st) ? 0 : 1;
+    proc.seq.set (pad, st, paintValue == 1);
+    lastCell = r * 100 + c;
+    repaint();
+}
+
+void SeqGridView::mouseDrag (const juce::MouseEvent& e)
+{
+    int r, c;
+    if (paintValue < 0 || ! hit (e.getPosition(), r, c) || r * 100 + c == lastCell) return;
+    lastCell = r * 100 + c;
+    proc.seq.set (bank * sf::padsPerBank + r, bar * sf::stepsPerBar + c, paintValue == 1);   // trascinando si dipinge
+    repaint();
+}
+
 // ======================================================================== PadView
 void PadView::setPad (std::shared_ptr<const sf::Pad> p)
 {
@@ -97,6 +180,7 @@ SampleForgeEditor::SampleForgeEditor (SampleForgeProcessor& p) : AudioProcessorE
     panicBtn.getProperties().set ("led", true); panicBtn.getProperties().set ("ledColour", "ffff3b30");
     panicBtn.setTooltip ("Ferma subito tutti i suoni");
     loadBtn.onClick = [this] { chooseFiles(); };
+    loadBtn.setTooltip ("Carica un brano (mp3, wav, aiff, flac) oppure tutti gli stem insieme");
     panicBtn.onClick = [this] { proc.requestPanic(); panicFlash = 15; heldKeys.clear(); };
     origBtn.getProperties().set ("led", true);
     origBtn.onClick = [this] { proc.playOriginal (proc.isPlayingOriginal() ? -1 : 0); };
@@ -150,14 +234,72 @@ SampleForgeEditor::SampleForgeEditor (SampleForgeProcessor& p) : AudioProcessorE
     bpmEdit.setText ("120");
     addAndMakeVisible (bpmEdit);
     auto bpmValue = [this] { return bpmEdit.getText().replaceCharacter (',', '.').getDoubleValue(); };
+    bpmEdit.onTextChange = [this, bpmValue] { const double b = bpmValue(); if (b >= 40 && b <= 300) proc.seq.bpm = (float) b; };   // tempo della sequenza
     halfBtn.onClick = [this, bpmValue] { proc.reslice (std::round (bpmValue() / 2 * 100) / 100); };
     doubleBtn.onClick = [this, bpmValue] { proc.reslice (std::round (bpmValue() * 2 * 100) / 100); };
     resliceBtn.onClick = [this, bpmValue] { const double b = bpmValue(); if (b >= 40 && b <= 300) proc.reslice (b); else showToast ("BPM fuori intervallo (40-300)"); };
-    halfBtn.setTooltip ("Dimezza il tempo e ritaglia di nuovo"); doubleBtn.setTooltip ("Raddoppia il tempo e ritaglia di nuovo"); resliceBtn.setTooltip ("Ritaglia i campioni con il BPM scritto");
+    halfBtn.setTooltip ("Dimezza il tempo e ritaglia di nuovo"); doubleBtn.setTooltip ("Raddoppia il tempo e ritaglia di nuovo"); resliceBtn.setTooltip (juce::String::fromUTF8 ("Ritaglia i campioni con il BPM scritto. Se il tempo rilevato è il doppio o la metà, usa /2 o x2"));
 
     bitsBox.addItem ("WAV 24 BIT", 24); bitsBox.addItem ("WAV 16 BIT", 16); bitsBox.setSelectedId (24);
     addAndMakeVisible (bitsBox); addAndMakeVisible (opt432); addAndMakeVisible (optStems);
     exportBtn.onClick = [this] { chooseExport(); };
+    optLoop.setToggleState (true, juce::dontSendNotification);
+    optLoop.setTooltip ("Aggiunge allo zip il loop della sequenza, reso alla durata esatta delle battute");
+    addAndMakeVisible (optLoop);
+
+    // brano di prova e MVSep
+    demoBtn.setTooltip ("Genera un brano sintetico (112 BPM, Am-F-C-G) per provare l'app");
+    demoBtn.onClick = [this] { proc.loadDemo(); };
+    mvsepBtn.getProperties().set ("led", true);
+    mvsepBtn.getProperties().set ("ledColour", "ff3ee05c");
+    mvsepBtn.setTooltip ("Separazione con MVSep (serve una chiave API e internet): clic per la chiave e il modello");
+    mvsepBtn.onClick = [this] { openMvsepSettings(); };
+    for (auto* b : { &demoBtn, &mvsepBtn }) addAndMakeVisible (*b);
+
+    // sequenza
+    addChildComponent (seqGrid);
+    viewPads.onClick = [this] { setSeqView (false); };
+    viewSeq.onClick = [this] { setSeqView (true); };
+    for (auto* b : { &viewPads, &viewSeq }) { b->getProperties().set ("led", true); b->getProperties().set ("ledColour", "ff3d8bff"); addAndMakeVisible (*b); }
+    playBtn.getProperties().set ("led", true); playBtn.getProperties().set ("ledColour", "ff3ee05c");
+    playBtn.setTooltip ("Avvia e ferma la sequenza. In una DAW che suona segue il tempo del progetto");
+    playBtn.onClick = [this] { const bool on = ! proc.seq.playing.load(); proc.seq.playing = on; if (! on) proc.seq.rec = false; };
+    recBtn.getProperties().set ("led", true); recBtn.getProperties().set ("ledColour", "ffff3b30");
+    recBtn.setTooltip ("Con la sequenza in moto, i pad che suoni finiscono nella griglia, quantizzati");
+    recBtn.onClick = [this] { const bool on = ! proc.seq.rec.load(); proc.seq.rec = on; if (on && ! proc.seq.playing.load()) proc.seq.playing = true; if (on) setSeqView (true); };
+    metroBtn.getProperties().set ("led", true); metroBtn.getProperties().set ("ledColour", "ffffb020");
+    metroBtn.onClick = [this] { proc.seq.metro = ! proc.seq.metro.load(); };
+    for (int i = 1; i <= sf::maxBars; ++i) if (i != 3) barsBox.addItem (juce::String (i), i);
+    barsBox.onChange = [this] { proc.seq.bars = barsBox.getSelectedId(); seqGrid.repaint(); };
+    quantBox.addItem ("1/16", 1); quantBox.addItem ("1/8", 2); quantBox.addItem ("1/4", 4);
+    quantBox.setTooltip ("Quantizzazione della registrazione");
+    quantBox.onChange = [this] { proc.seq.quant = quantBox.getSelectedId(); };
+    swingSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+    swingSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 44, 22);
+    swingSlider.setRange (0, 100, 1);
+    swingSlider.setTooltip ("Swing: ritarda i passi pari fino a un terzo di passo");
+    swingSlider.onValueChange = [this] { proc.seq.swing = (float) swingSlider.getValue(); };
+    for (int i = 0; i < sf::maxBars; ++i)
+    {
+        barBtns[(size_t) i].setButtonText ("BATT. " + juce::String (i + 1));
+        barBtns[(size_t) i].getProperties().set ("led", true); barBtns[(size_t) i].getProperties().set ("ledColour", "ffffb020");
+        barBtns[(size_t) i].onClick = [this, i] { seqGrid.setBar (i); };
+        addChildComponent (barBtns[(size_t) i]);
+    }
+    muteBankBtn.getProperties().set ("led", true); muteBankBtn.getProperties().set ("ledColour", "ffff3b30");
+    muteBankBtn.onClick = [this] { auto& m = proc.seq.mute[(size_t) bank]; m = ! m.load(); seqGrid.repaint(); };
+    clearBankBtn.setTooltip ("Svuota la sequenza del banco scelto (SHIFT + clic)");
+    clearBankBtn.onClick = [this]
+    {
+        if (! juce::ModifierKeys::currentModifiers.isShiftDown()) { showToast ("SHIFT + clic per svuotare la sequenza del banco"); return; }
+        proc.seq.clearBank (bank); seqGrid.repaint();
+    };
+    for (auto* c : std::initializer_list<juce::Component*> { &playBtn, &recBtn, &metroBtn, &barsBox, &quantBox, &swingSlider }) addAndMakeVisible (*c);
+    for (auto* c : std::initializer_list<juce::Component*> { &muteBankBtn, &clearBankBtn }) addChildComponent (*c);
+    barsBox.setSelectedId (proc.seq.bars.load(), juce::dontSendNotification);
+    quantBox.setSelectedId (proc.seq.quant.load(), juce::dontSendNotification);
+    swingSlider.setValue (proc.seq.swing.load(), juce::dontSendNotification);
+    setSeqView (false);
 
     addAndMakeVisible (ledBtn);
     ledBtn.setToggleState (proc.controllerLedsOn(), juce::dontSendNotification);
@@ -200,7 +342,63 @@ void SampleForgeEditor::selectBank (int b)
     auto r = proc.getResult();
     for (int i = 0; i < sf::padsPerBank; ++i)
         padViews[(size_t) i]->setPad (r ? std::shared_ptr<const sf::Pad> (r, r->banks[(size_t) b].pads[(size_t) i].get()) : nullptr);
+    seqGrid.setBank (b);
+    refreshSeqLabels();
     repaint();
+}
+
+void SampleForgeEditor::refreshSeqLabels()
+{
+    std::array<juce::String, sf::padsPerBank> l;
+    if (auto r = proc.getResult())
+        for (int i = 0; i < sf::padsPerBank; ++i)
+            if (auto pad = r->banks[(size_t) bank].pads[(size_t) i]) l[(size_t) i] = u8 (pad->label).toUpperCase();
+    seqGrid.setLabels (l);
+}
+
+void SampleForgeEditor::setSeqView (bool on)
+{
+    seqView = on;
+    for (auto& pv : padViews) pv->setVisible (! on);
+    seqGrid.setVisible (on);
+    for (auto& b : barBtns) b.setVisible (on);
+    muteBankBtn.setVisible (on); clearBankBtn.setVisible (on);
+    viewPads.setToggleState (! on, juce::dontSendNotification);
+    viewSeq.setToggleState (on, juce::dontSendNotification);
+    if (getWidth() > 0) resized();
+    repaint();
+}
+
+void SampleForgeEditor::openMvsepSettings()
+{
+    auto* w = new juce::AlertWindow ("MVSEP", juce::String::fromUTF8 ("Separazione con MVSep: il brano viene inviato a mvsep.com, che restituisce gli stem. "
+                                     "Serve una chiave API (dal tuo account su mvsep.com) e internet. La chiave resta solo su questo computer."),
+                                     juce::MessageBoxIconType::NoIcon, this);
+    w->addTextEditor ("key", proc.mvsep.key, "CHIAVE API", true);
+    juce::StringArray models, fmts;
+    int mi = 0, fi = 0;
+    for (int i = 0; i < (int) std::size (sf::mvsepModels); ++i) { models.add (sf::mvsepModels[i].label); if (sf::mvsepModels[i].value == proc.mvsep.model) mi = i; }
+    for (int i = 0; i < (int) std::size (sf::mvsepFormats); ++i) { fmts.add (sf::mvsepFormats[i].label); if (sf::mvsepFormats[i].value == proc.mvsep.format) fi = i; }
+    w->addComboBox ("model", models, "MODELLO");
+    w->addComboBox ("format", fmts, "FORMATO DEGLI STEM");
+    w->getComboBoxComponent ("model")->setSelectedItemIndex (mi);
+    w->getComboBoxComponent ("format")->setSelectedItemIndex (fi);
+    w->addButton ("USA MVSEP", 1);
+    w->addButton ("SEPARAZIONE INTERNA", 2);
+    w->addButton ("ANNULLA", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    juce::Component::SafePointer<SampleForgeEditor> safe (this);
+    w->enterModalState (true, juce::ModalCallbackFunction::create ([safe, w] (int res)
+    {
+        if (safe == nullptr || res == 0) return;
+        auto& m = safe->proc.mvsep;
+        m.key = w->getTextEditorContents ("key").trim();
+        m.model = sf::mvsepModels[juce::jlimit (0, (int) std::size (sf::mvsepModels) - 1, w->getComboBoxComponent ("model")->getSelectedItemIndex())].value;
+        m.format = sf::mvsepFormats[juce::jlimit (0, (int) std::size (sf::mvsepFormats) - 1, w->getComboBoxComponent ("format")->getSelectedItemIndex())].value;
+        m.enabled = res == 1 && m.key.isNotEmpty();
+        m.save();
+        safe->showToast (m.enabled ? juce::String ("MVSep attivo: carica un brano e lo separa mvsep.com")
+                                   : res == 1 ? juce::String ("Manca la chiave: resta la separazione interna") : juce::String ("Separazione interna (nel computer)"));
+    }), true);
 }
 
 void SampleForgeEditor::refreshControls()
@@ -221,6 +419,7 @@ void SampleForgeEditor::refreshFromResult()
         if (r) bpmEdit.setText (fmtBpm (r->bpm), juce::dontSendNotification);
         selectedPad = -1;
         selectBank (bank);
+        refreshSeqLabels();
     }
     const bool ready = r != nullptr;
     for (auto* b : { &halfBtn, &doubleBtn, &resliceBtn, &exportBtn, &origBtn }) b->setEnabled (ready);
@@ -253,7 +452,7 @@ void SampleForgeEditor::chooseExport()
                               auto f = fc.getResult();
                               if (f == juce::File()) return;
                               if (! f.hasFileExtension ("zip")) f = f.withFileExtension ("zip");
-                              proc.exportPack (f, { bitsBox.getSelectedId(), opt432.getToggleState(), optStems.getToggleState() });
+                              proc.exportPack (f, { bitsBox.getSelectedId(), opt432.getToggleState(), optStems.getToggleState(), optLoop.getToggleState() });
                           });
 }
 
@@ -321,6 +520,13 @@ void SampleForgeEditor::timerCallback()
         padViews[(size_t) i]->setPlayhead (ph);
         padViews[(size_t) i]->setLit (ph >= 0 || proc.sampler.latched[(size_t) idx].load());
     }
+    playBtn.setToggleState (proc.seq.playing.load(), juce::dontSendNotification);
+    recBtn.setToggleState (proc.seq.rec.load(), juce::dontSendNotification);
+    metroBtn.setToggleState (proc.seq.metro.load(), juce::dontSendNotification);
+    mvsepBtn.setToggleState (proc.mvsep.enabled, juce::dontSendNotification);
+    muteBankBtn.setToggleState (proc.seq.mute[(size_t) bank].load(), juce::dontSendNotification);
+    for (int i = 0; i < sf::maxBars; ++i) barBtns[(size_t) i].setToggleState (i == seqGrid.getBar(), juce::dontSendNotification);
+    if (seqView) seqGrid.repaint();
     const bool orig = proc.isPlayingOriginal();
     origBtn.setToggleState (orig, juce::dontSendNotification);
     origBtn.setButtonText (orig ? "FERMA ORIGINALE" : "ASCOLTA ORIGINALE");
@@ -335,7 +541,20 @@ void SampleForgeEditor::timerCallback()
     static const juce::String shotPath = juce::SystemStats::getEnvironmentVariable ("SF_SCREENSHOT", {});
     if (shotPath.isNotEmpty() && proc.getResult() != nullptr && ! st.busy)
     {
-        if (++shotCountdown == 20) { selectBank (2); proc.padDown (2 * sf::padsPerBank); }   // un loop in play per vedere la linea
+        if (++shotCountdown == 20)
+        {
+            if (juce::SystemStats::getEnvironmentVariable ("SF_SCREENSHOT_SEQ", {}).isNotEmpty())
+            {
+                // schermata della vista SEQUENZA: un giro di batteria in moto
+                selectBank (0);
+                for (int st = 0; st < 16; st += 4) proc.seq.set (0, st, true);
+                for (int st = 4; st < 16; st += 8) proc.seq.set (1, st, true);
+                for (int st = 2; st < 16; st += 2) proc.seq.set (2, st, true);
+                proc.seq.playing = true;
+                setSeqView (true);
+            }
+            else { selectBank (2); proc.padDown (2 * sf::padsPerBank); }   // un loop in play per vedere la linea
+        }
         if (shotCountdown == 50)
         {
             juce::File out (shotPath); out.deleteFile();
@@ -355,9 +574,9 @@ void SampleForgeEditor::timerCallback()
 void SampleForgeEditor::paint (juce::Graphics& g)
 {
     ui::paintChassis (g, getLocalBounds());
-    ui::paintBrand (g, headerArea.toFloat().withTrimmedRight (360).removeFromTop (34.f), "SAMPLE FORGE");
+    ui::paintBrand (g, headerArea.toFloat().withTrimmedRight (670).removeFromTop (34.f), "SAMPLE FORGE");
     g.setColour (C::printDim); g.setFont (ui::Fonts::label (13.f));
-    g.drawText ("BRANO DENTRO  >  PACCHETTO DI CAMPIONI FUORI", headerArea.withTrimmedTop (38).withTrimmedRight (360), juce::Justification::topLeft);
+    g.drawText ("BRANO DENTRO  >  PACCHETTO DI CAMPIONI FUORI", headerArea.withTrimmedTop (38).withTrimmedRight (670), juce::Justification::topLeft);
 
     // display
     ui::paintRecess (g, lcdArea.toFloat());
@@ -439,11 +658,15 @@ void SampleForgeEditor::paint (juce::Graphics& g)
         g.drawText (knobs[(size_t) i].name, ctrl.getX(), knobs[(size_t) i].slider.getY(), 74, knobs[(size_t) i].slider.getHeight(), juce::Justification::centredLeft);
     ui::paintEngravedLine (g, { (float) controlsArea.getX() - 14, (float) padsArea.getY() }, { (float) controlsArea.getX() - 14, (float) padsArea.getBottom() });
 
-    section (transportArea, "TEMPO E RITAGLIO");
+    section (transportArea, "TEMPO, RITAGLIO E SEQUENZA");
     g.setColour (C::print); g.setFont (ui::Fonts::label (14.f));
     g.drawText ("BPM", bpmEdit.getBounds().translated (-48, 0).withWidth (40), juce::Justification::centredRight);
-    g.setColour (C::printDim);
-    g.drawFittedText (juce::String::fromUTF8 ("Se il tempo rilevato è il doppio o la metà, usa /2 o x2: i campioni vengono ritagliati di nuovo."), resliceBtn.getBounds().withX (resliceBtn.getRight() + 18).withRight (transportArea.getRight()), juce::Justification::centredLeft, 2, 0.9f);
+    g.setColour (C::printDim); g.setFont (ui::Fonts::label (12.f));
+    auto labelAbove = [&g] (const juce::Component& c, const juce::String& t) { g.drawText (t, c.getX(), c.getY() - 18, c.getWidth() + 40, 16, juce::Justification::centredLeft); };
+    labelAbove (playBtn, "SEQUENZA");
+    labelAbove (barsBox, "BATTUTE");
+    labelAbove (quantBox, "QUANT REC");
+    labelAbove (swingSlider, "SWING");
 
     section (exportArea, "ESPORTA PACCHETTO");
 
@@ -481,11 +704,15 @@ void SampleForgeEditor::resized()
     headerArea = area.removeFromTop (58);
     {
         auto h = headerArea.withTrimmedTop (8).removeFromTop (34);
-        panicBtn.setBounds (h.removeFromRight (110));
-        h.removeFromRight (10);
-        ledBtn.setBounds (h.removeFromRight (190));
-        h.removeFromRight (10);
-        loadBtn.setBounds (h.removeFromRight (220));
+        panicBtn.setBounds (h.removeFromRight (90));
+        h.removeFromRight (8);
+        ledBtn.setBounds (h.removeFromRight (150));
+        h.removeFromRight (8);
+        mvsepBtn.setBounds (h.removeFromRight (90));
+        h.removeFromRight (8);
+        demoBtn.setBounds (h.removeFromRight (140));
+        h.removeFromRight (8);
+        loadBtn.setBounds (h.removeFromRight (160));
     }
     area.removeFromTop (10);
     lcdArea = area.removeFromTop (118);
@@ -506,6 +733,16 @@ void SampleForgeEditor::resized()
     padsArea = area;
     controlsArea = padsArea.removeFromRight (300);
     padsArea.removeFromRight (28);
+    // vista PAD / SEQUENZA: i due tasti stanno sopra l'angolo destro dei pad
+    viewSeq.setBounds (padsArea.getRight() - 110, padsArea.getY() - 30, 110, 24);
+    viewPads.setBounds (padsArea.getRight() - 196, padsArea.getY() - 30, 80, 24);
+    {
+        auto top = padsArea.withHeight (28);
+        for (auto& b : barBtns) { b.setBounds (top.removeFromLeft (92)); top.removeFromLeft (6); }
+        clearBankBtn.setBounds (top.removeFromRight (130)); top.removeFromRight (6);
+        muteBankBtn.setBounds (top.removeFromRight (120));
+        seqGrid.setBounds (padsArea.withTrimmedTop (34));
+    }
     {
         const int gap = 10, cols = 4, rows = 2;
         const int pw = (padsArea.getWidth() - gap * (cols - 1)) / cols, ph = (padsArea.getHeight() - gap * (rows - 1)) / rows;
@@ -530,13 +767,21 @@ void SampleForgeEditor::resized()
         bpmEdit.setBounds (t.removeFromLeft (90)); t.removeFromLeft (10);
         halfBtn.setBounds (t.removeFromLeft (54)); t.removeFromLeft (6);
         doubleBtn.setBounds (t.removeFromLeft (54)); t.removeFromLeft (6);
-        resliceBtn.setBounds (t.removeFromLeft (120));
+        resliceBtn.setBounds (t.removeFromLeft (110));
+        t.removeFromLeft (28);
+        playBtn.setBounds (t.removeFromLeft (74)); t.removeFromLeft (6);
+        recBtn.setBounds (t.removeFromLeft (64)); t.removeFromLeft (6);
+        metroBtn.setBounds (t.removeFromLeft (80)); t.removeFromLeft (16);
+        barsBox.setBounds (t.removeFromLeft (66)); t.removeFromLeft (10);
+        quantBox.setBounds (t.removeFromLeft (80)); t.removeFromLeft (12);
+        swingSlider.setBounds (t.removeFromLeft (std::min (200, t.getWidth())));
     }
     {
         auto e = exportArea.withTrimmedTop (44).removeFromTop (34);
         bitsBox.setBounds (e.removeFromLeft (160)); e.removeFromLeft (16);
-        opt432.setBounds (e.removeFromLeft (190)); e.removeFromLeft (8);
-        optStems.setBounds (e.removeFromLeft (190));
+        opt432.setBounds (e.removeFromLeft (170)); e.removeFromLeft (8);
+        optStems.setBounds (e.removeFromLeft (170)); e.removeFromLeft (8);
+        optLoop.setBounds (e.removeFromLeft (220));
         exportBtn.setBounds (e.removeFromRight (230));
     }
 }

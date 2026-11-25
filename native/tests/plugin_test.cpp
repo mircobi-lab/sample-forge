@@ -45,6 +45,22 @@ int main (int argc, char** argv)
     block(); const float after = block();
     check (after < 1e-6f && ! proc.sampler.latched[(size_t) (2 * sf::padsPerBank)].load(), "PANIC ferma tutto");
 
+    // sequenza: 4 colpi del pad A in una battuta a 120 BPM, poi REC del pad S suonato a mano
+    for (int b = 0; b < sf::numBanks; ++b) proc.seq.clearBank (b);
+    for (int st : { 0, 4, 8, 12 }) proc.seq.set (0, st, true);
+    proc.seq.bars = 1; proc.seq.bpm = 120.f; proc.seq.metro = false; proc.seq.playing = true;
+    int loud = 0, maxStep = -1;
+    for (int i = 0; i < 188; ++i) { if (block() > 0.005f) loud++; maxStep = std::max (maxStep, proc.seqEngine.stepUi.load()); }   // 2 s = una battuta
+    check (loud > 20 && maxStep == 15, "la sequenza suona e arriva al passo 16 (blocchi con suono " + juce::String (loud) + ")");
+    proc.seq.rec = true;
+    for (int i = 0; i < 30; ++i) block();
+    proc.padDown (1); block(); proc.padUp (1);
+    proc.seq.rec = false;
+    int recorded = 0; for (int st = 0; st < 16; ++st) if (proc.seq.get (1, st)) recorded++;
+    check (recorded == 1, "REC: il pad S suonato a mano finisce su un passo");
+    proc.seq.playing = false; block();
+    proc.requestPanic(); block(); block();
+
     // export
     juce::File zip { juce::String (argv[2]) }; zip.deleteFile();
     changed = false;
@@ -52,14 +68,16 @@ int main (int argc, char** argv)
     const auto t1 = juce::Time::getMillisecondCounterHiRes();
     while (! changed && juce::Time::getMillisecondCounterHiRes() - t1 < 120000) mm.runDispatchLoopUntil (50);
     juce::ZipFile zf (zip);
-    int wavs = 0, w432 = 0; bool info = false;
+    int wavs = 0, w432 = 0; bool info = false, seqLoop = false;
     for (int i = 0; i < zf.getNumEntries(); ++i)
     {
         const auto n = zf.getEntry (i)->filename;
         if (n.endsWith (".wav")) { wavs++; if (n.contains ("/432Hz/")) w432++; }
         if (n.endsWith ("INFO.txt")) info = true;
+        if (n.contains ("/06_Sequenza/Sequenza_1batt_120bpm_") && ! n.contains ("432Hz")) seqLoop = true;
     }
-    check (zip.existsAsFile() && wavs == 2 * pads && w432 == pads && info,
+    check (seqLoop, "zip: loop della sequenza in 06_Sequenza");
+    check (zip.existsAsFile() && wavs == 2 * (pads + 1) && w432 == pads + 1 && info,
            "zip: " + juce::String (wavs) + " WAV (" + juce::String (w432) + " a 432 Hz), INFO.txt " + (info ? "presente" : "mancante") + ", " + juce::String (zip.getSize() / 1048576.0, 1) + " MB");
     if (zf.getNumEntries() > 0)
     {
@@ -67,6 +85,30 @@ int main (int argc, char** argv)
         juce::WavAudioFormat wav;
         std::unique_ptr<juce::AudioFormatReader> rd (wav.createReaderFor (in.release(), true));
         check (rd != nullptr && rd->bitsPerSample == 24 && rd->numChannels == 2, "primo WAV leggibile, 24 bit stereo");
+    }
+    // loop della sequenza: durata esatta di una battuta a 120 BPM (2 s)
+    for (int i = 0; i < zf.getNumEntries(); ++i)
+        if (zf.getEntry (i)->filename.contains ("/06_Sequenza/") && ! zf.getEntry (i)->filename.contains ("432Hz"))
+        {
+            std::unique_ptr<juce::InputStream> in (zf.createStreamForEntry (i));
+            juce::WavAudioFormat wav;
+            std::unique_ptr<juce::AudioFormatReader> rd (wav.createReaderFor (in.release(), true));
+            const double secs = rd != nullptr ? rd->lengthInSamples / rd->sampleRate : 0;
+            check (std::abs (secs - 2.0) < 0.001, "loop lungo " + juce::String (secs, 4) + " s (atteso 2,0000)");
+        }
+
+    // brano di prova sintetico
+    {
+        SampleForgeProcessor demo;
+        bool done = false;
+        demo.onStateChanged = [&] { done = true; };
+        demo.loadDemo();
+        const auto t2 = juce::Time::getMillisecondCounterHiRes();
+        while (! done && juce::Time::getMillisecondCounterHiRes() - t2 < 180000) mm.runDispatchLoopUntil (50);
+        auto dr = demo.getResult();
+        check (dr != nullptr && demo.getSongName().startsWith ("Brano di prova"), "brano di prova analizzato: " + demo.getStatus().message);
+        if (dr != nullptr)
+            check (std::abs (dr->bpm - 112.0) < 1.0, "BPM del brano di prova " + juce::String (dr->bpm) + " (atteso 112), tonalita' " + juce::String (dr->key.name));
     }
     std::printf (failures ? "ESITO: FALLITO (%d)\n" : "ESITO: OK\n", failures);
     return failures ? 1 : 0;
